@@ -1,9 +1,14 @@
 package com.RNFetchBlob;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.DownloadManager;
 import android.content.Intent;
 import android.net.Uri;
+import android.content.pm.PackageManager;
+import android.support.v4.app.ActivityCompat;
+import android.support.v4.content.FileProvider;
+import android.os.Build;
 import android.util.SparseArray;
 
 import com.facebook.react.bridge.ActivityEventListener;
@@ -15,6 +20,8 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
+import com.facebook.react.modules.core.PermissionAwareActivity;
+import com.facebook.react.modules.core.PermissionListener;
 
 // Cookies
 import com.facebook.react.bridge.WritableMap;
@@ -29,6 +36,11 @@ import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.io.File;
+import java.util.List;
+import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.concurrent.Callable;
 
 import static android.app.Activity.RESULT_OK;
 import static com.RNFetchBlob.RNFetchBlobConst.GET_CONTENT_INTENT;
@@ -36,6 +48,8 @@ import static com.RNFetchBlob.RNFetchBlobConst.GET_CONTENT_INTENT;
 public class RNFetchBlob extends ReactContextBaseJavaModule {
 
     private final OkHttpClient mClient;
+    private Uri mViewIntentURI;
+    private String mPermissionsError;
 
     static ReactApplicationContext RCTContext;
     private static LinkedBlockingQueue<Runnable> taskQueue = new LinkedBlockingQueue<>();
@@ -106,9 +120,17 @@ public class RNFetchBlob extends ReactContextBaseJavaModule {
     @ReactMethod
     public void actionViewIntent(String path, String mime, final Promise promise) {
         try {
-            Intent intent= new Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(Uri.parse("file://" + path), mime);
-            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+
+            mViewIntentURI = FileProvider.getUriForFile(
+                    this.getReactApplicationContext(),
+                    this.getReactApplicationContext().getPackageName() + ".provider",
+                    new File(path)
+            );
+            intent.setDataAndType(mViewIntentURI, mime);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
             this.getReactApplicationContext().startActivity(intent);
             ActionViewVisible = true;
 
@@ -329,13 +351,35 @@ public class RNFetchBlob extends ReactContextBaseJavaModule {
     }
 
     @ReactMethod
-    public void fetchBlob(ReadableMap options, String taskId, String method, String url, ReadableMap headers, String body, final Callback callback) {
-        new RNFetchBlobReq(options, taskId, method, url, headers, body, null, mClient, callback).run();
-}
+    public void fetchBlob(final ReadableMap options, final String taskId, final String method, final String url, final ReadableMap headers, final String body, final Callback callback) {
+      permissionsCheck(this.getCurrentActivity(), Arrays.asList(Manifest.permission.WRITE_EXTERNAL_STORAGE), new Callable<Void>() {
+        @Override
+        public Void call() throws Exception {
+          if (mPermissionsError == null) {
+            new RNFetchBlobReq(options, taskId, method, url, headers, body, null, mClient, callback).run();
+          } else {
+            callback.invoke(mPermissionsError, null, null);
+          }
+
+          return null;
+        }
+      });
+    }
 
     @ReactMethod
-    public void fetchBlobForm(ReadableMap options, String taskId, String method, String url, ReadableMap headers, ReadableArray body, final Callback callback) {
-        new RNFetchBlobReq(options, taskId, method, url, headers, null, body, mClient, callback).run();
+    public void fetchBlobForm(final ReadableMap options, final String taskId, final String method, final String url, final ReadableMap headers, final ReadableArray body, final Callback callback) {
+      permissionsCheck(this.getCurrentActivity(), Arrays.asList(Manifest.permission.WRITE_EXTERNAL_STORAGE), new Callable<Void>() {
+        @Override
+        public Void call() throws Exception {
+          if (mPermissionsError == null) {
+            new RNFetchBlobReq(options, taskId, method, url, headers, null, body, mClient, callback).run();
+          } else {
+            callback.invoke(mPermissionsError, null, null);
+          }
+
+          return null;
+        }
+      });
     }
 
     @ReactMethod
@@ -375,6 +419,55 @@ public class RNFetchBlob extends ReactContextBaseJavaModule {
             promise.reject("EUNSPECIFIED", ex.getLocalizedMessage());
         }
 
+    }
+
+    private void permissionsCheck(final Activity activity, final List<String> requiredPermissions, final Callable<Void> callback) {
+
+      mPermissionsError = null;
+      List<String> missingPermissions = new ArrayList<>();
+
+      for (String permission : requiredPermissions) {
+        int status = ActivityCompat.checkSelfPermission(activity, permission);
+        if (status != PackageManager.PERMISSION_GRANTED) {
+          missingPermissions.add(permission);
+        }
+      }
+
+      if (!missingPermissions.isEmpty()) {
+
+        ((PermissionAwareActivity) activity).requestPermissions(missingPermissions.toArray(new String[missingPermissions.size()]), 1, new PermissionListener() {
+
+          @Override
+          public boolean onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+            if (requestCode == 1) {
+
+              for (int grantResult : grantResults) {
+                if (grantResult == PackageManager.PERMISSION_DENIED) {
+                  mPermissionsError = "Required permission missing";
+                  break;
+                }
+              }
+
+              try {
+                callback.call();
+              } catch (Exception e) {
+                e.printStackTrace();
+              }
+            }
+
+            return true;
+          }
+        });
+
+        return;
+      }
+
+      // all permissions granted
+      try {
+        callback.call();
+      } catch (Exception e) {
+        e.printStackTrace();
+      }
     }
 
 }
